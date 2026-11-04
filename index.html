@@ -611,22 +611,9 @@
     pricesAt  = Date.now();
   }
 
-  // price on a day = latest bulletin on or before it (none is published off-season)
-  function priceOn(key) {
-    let p = null;
-    for (const [k, v] of priceDays) { if (k > key) break; p = v; }
-    return p;
-  }
-
-  // average €/L over [from, to), days up to today
-  function priceRange(from, to) {
-    const today = startOfDay(new Date());
-    let sum = 0, n = 0;
-    for (let d = new Date(from); d < to && d <= today; d = addPeriod(d, "day", 1)) {
-      const p = priceOn(ymd(d));
-      if (p != null) { sum += p; n++; }
-    }
-    return n ? sum / n : null;
+  // latest price in the file (€/L), used for every period
+  function priceRange() {
+    return priceDays.length ? priceDays[priceDays.length - 1][1] : null;
   }
 
   const nfEur = new Intl.NumberFormat(undefined, { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
@@ -1004,7 +991,7 @@
         refilled: r ? Number(r.refilled_l) : 0,
         hasData:  !!r,
         temp:     weatherRange(d, addPeriod(d, p, 1)),
-        price:    priceRange(d, addPeriod(d, p, 1))
+        price:    priceRange()
       });
     }
 
