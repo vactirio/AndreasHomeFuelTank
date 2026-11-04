@@ -1,0 +1,934 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Fuel">
+<meta name="theme-color" content="#111214">
+<title>Fuel Tank</title>
+
+
+<style>
+  /* ------------------------------------------------------------------ */
+  /* Colour tokens - light                                               */
+  /* ------------------------------------------------------------------ */
+
+  :root {
+    color-scheme: light;
+    --bg:          #f1f2f0;
+    --card:        #fcfcfb;
+    --line:        #e3e3df;
+    --text:        #0b0b0b;
+    --text-2:      #52514e;
+    --text-3:      #807f7a;
+    --level:       #2a78d6;     /* fuel level series   */
+    --level-soft:  rgba(42, 120, 214, 0.14);
+    --cons:        #eb6834;     /* consumption series  */
+    --ok:          #1f8a3b;
+    --warn:        #b26a00;
+    --crit:        #c23b3a;
+    --seg-on:      #e7eef9;
+  }
+
+
+  /* ------------------------------------------------------------------ */
+  /* Colour tokens - dark (OS setting, unless the page is forced light)  */
+  /* ------------------------------------------------------------------ */
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg:          #111214;
+      --card:        #1a1a19;
+      --line:        #2c2c2a;
+      --text:        #f0efec;
+      --text-2:      #c3c2b7;
+      --text-3:      #8f8e86;
+      --level:       #3987e5;
+      --level-soft:  rgba(57, 135, 229, 0.18);
+      --cons:        #d95926;
+      --ok:          #4cc36b;
+      --warn:        #e9a23b;
+      --crit:        #e66767;
+      --seg-on:      #22303f;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --bg:          #111214;
+    --card:        #1a1a19;
+    --line:        #2c2c2a;
+    --text:        #f0efec;
+    --text-2:      #c3c2b7;
+    --text-3:      #8f8e86;
+    --level:       #3987e5;
+    --level-soft:  rgba(57, 135, 229, 0.18);
+    --cons:        #d95926;
+    --ok:          #4cc36b;
+    --warn:        #e9a23b;
+    --crit:        #e66767;
+    --seg-on:      #22303f;
+  }
+
+
+  /* ------------------------------------------------------------------ */
+  /* Page                                                                */
+  /* ------------------------------------------------------------------ */
+
+  * { box-sizing: border-box; }
+
+  html, body { margin: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom));
+  }
+
+  main { max-width: 980px; margin: 0 auto; }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
+  }
+
+  h1 { font-size: 20px; font-weight: 650; margin: 0; }
+
+  h2 { font-size: 15px; font-weight: 600; margin: 0; }
+
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); }
+  .status i { width: 9px; height: 9px; border-radius: 50%; background: var(--text-3); display: inline-block; }
+  .status.ok   i { background: var(--ok); }
+  .status.warn i { background: var(--warn); }
+  .status.err  i { background: var(--crit); }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+  }
+
+
+  /* ------------------------------------------------------------------ */
+  /* Tiles                                                               */
+  /* ------------------------------------------------------------------ */
+
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+
+  @media (min-width: 760px) {
+    .tiles { grid-template-columns: 2fr 1fr 1fr; }
+    .tiles .hero { grid-row: span 2; }
+  }
+
+  .tiles .hero { grid-column: 1 / -1; }
+
+  @media (min-width: 760px) {
+    .tiles .hero { grid-column: auto; }
+  }
+
+  .hero { display: flex; gap: 18px; align-items: center; }
+
+  .tank-svg { flex: 0 0 auto; width: 74px; height: 120px; }
+
+  .label { font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--text-3); }
+
+  .hero-value {
+    font-size: clamp(44px, 13vw, 64px);
+    font-weight: 700;
+    line-height: 1.05;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+
+  .hero-value small, .tile-value small { font-size: 0.42em; font-weight: 500; color: var(--text-2); margin-left: 4px; }
+
+  .hero-sub { color: var(--text-2); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  .pill {
+    display: inline-flex; align-items: center; gap: 5px;
+    font-size: 12px; font-weight: 600;
+    padding: 2px 8px; border-radius: 999px;
+    border: 1px solid currentColor;
+    margin-top: 6px;
+  }
+  .pill.low  { color: var(--warn); }
+  .pill.crit { color: var(--crit); }
+
+  .tile-value {
+    font-size: 28px;
+    font-weight: 650;
+    font-variant-numeric: tabular-nums;
+    margin-top: 4px;
+  }
+
+  .tile-sub { color: var(--text-3); font-size: 12px; }
+
+
+  /* ------------------------------------------------------------------ */
+  /* Chart cards                                                         */
+  /* ------------------------------------------------------------------ */
+
+  .chart-card { margin-bottom: 12px; }
+
+  .bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+
+  .seg button {
+    background: transparent; color: var(--text); border: 0;
+    padding: 7px 14px; font: inherit; font-size: 13px; cursor: pointer;
+    min-height: 34px;
+  }
+  .seg button + button { border-left: 1px solid var(--line); }
+  .seg button[aria-pressed="true"] { background: var(--seg-on); font-weight: 600; }
+
+  .nav { display: flex; align-items: center; gap: 6px; }
+
+  .nav button {
+    width: 34px; height: 34px; border-radius: 10px;
+    border: 1px solid var(--line); background: transparent; color: var(--text);
+    font-size: 18px; line-height: 1; cursor: pointer;
+  }
+  .nav button:disabled { opacity: 0.35; cursor: default; }
+
+  .nav .period { min-width: 132px; text-align: center; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  .summary { font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; margin: -2px 0 8px; }
+  .summary b { color: var(--text); font-weight: 600; }
+
+  .chart-wrap { position: relative; height: 260px; }
+
+  .msg { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--text-3); font-size: 13px; text-align: center; padding: 0 20px; }
+  .msg.err { color: var(--crit); }
+
+  details { margin-top: 10px; font-size: 13px; color: var(--text-2); }
+  summary { cursor: pointer; }
+
+  table { width: 100%; border-collapse: collapse; margin-top: 8px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--text-3); font-weight: 500; }
+
+  footer { color: var(--text-3); font-size: 12px; text-align: center; margin-top: 6px; }
+</style>
+</head>
+
+
+<body>
+<main>
+
+
+  <header>
+    <h1>Fuel tank</h1>
+    <span id="status" class="status"><i></i><span id="statusText">Loading…</span></span>
+  </header>
+
+
+  <!-- ============================ Tiles ============================ -->
+
+  <section class="tiles">
+
+    <div class="card hero">
+      <svg class="tank-svg" viewBox="0 0 74 120" aria-hidden="true">
+        <rect x="2" y="2" width="70" height="116" rx="10" fill="none" stroke="var(--line)" stroke-width="3"/>
+        <clipPath id="tankClip"><rect x="4" y="4" width="66" height="112" rx="8"/></clipPath>
+        <rect id="tankFill" x="4" y="116" width="66" height="0" fill="var(--level)" clip-path="url(#tankClip)"/>
+        <text id="tankPct" x="37" y="64" text-anchor="middle" font-size="15" font-weight="700" fill="var(--text)">–</text>
+      </svg>
+      <div>
+        <div class="label">Remaining fuel</div>
+        <div class="hero-value" id="remaining">—<small>L</small></div>
+        <div class="hero-sub" id="heroSub">&nbsp;</div>
+        <div id="lowPill"></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="label">Used today</div>
+      <div class="tile-value" id="today">—<small>L</small></div>
+      <div class="tile-sub">since midnight</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Average / day</div>
+      <div class="tile-value" id="avg7">—<small>L</small></div>
+      <div class="tile-sub">last 7 full days</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Days left</div>
+      <div class="tile-value" id="daysLeft">—</div>
+      <div class="tile-sub">at the 7-day average</div>
+    </div>
+
+    <div class="card">
+      <div class="label">Last reading</div>
+      <div class="tile-value" id="lastAgo">—</div>
+      <div class="tile-sub" id="lastDist">&nbsp;</div>
+    </div>
+
+  </section>
+
+
+  <!-- ========================= Level chart ========================= -->
+
+  <section class="card chart-card">
+    <div class="bar">
+      <h2>Fuel level</h2>
+      <div class="seg" role="group" aria-label="Level period" id="levelSeg">
+        <button data-p="day"   aria-pressed="true">Day</button>
+        <button data-p="week"  aria-pressed="false">Week</button>
+        <button data-p="month" aria-pressed="false">Month</button>
+      </div>
+      <div class="nav">
+        <button id="levelPrev" aria-label="Previous">‹</button>
+        <span class="period" id="levelLabel">&nbsp;</span>
+        <button id="levelNext" aria-label="Next">›</button>
+      </div>
+    </div>
+    <div class="summary" id="levelSummary">&nbsp;</div>
+    <div class="chart-wrap">
+      <canvas id="levelChart" aria-label="Fuel level in litres over time"></canvas>
+      <div class="msg" id="levelMsg" hidden></div>
+    </div>
+  </section>
+
+
+  <!-- ====================== Consumption chart ====================== -->
+
+  <section class="card chart-card">
+    <div class="bar">
+      <h2>Fuel consumption</h2>
+      <div class="seg" role="group" aria-label="Consumption grouping" id="consSeg">
+        <button data-p="day"   aria-pressed="true">Day</button>
+        <button data-p="week"  aria-pressed="false">Week</button>
+        <button data-p="month" aria-pressed="false">Month</button>
+      </div>
+      <div class="nav">
+        <button id="consPrev" aria-label="Previous">‹</button>
+        <span class="period" id="consLabel">&nbsp;</span>
+        <button id="consNext" aria-label="Next">›</button>
+      </div>
+    </div>
+    <div class="summary" id="consSummary">&nbsp;</div>
+    <div class="chart-wrap">
+      <canvas id="consChart" aria-label="Fuel consumed per period in litres"></canvas>
+      <div class="msg" id="consMsg" hidden></div>
+    </div>
+    <details>
+      <summary>Show as table</summary>
+      <table>
+        <thead><tr><th>Period</th><th>Consumed (L)</th><th>Refilled (L)</th></tr></thead>
+        <tbody id="consTable"></tbody>
+      </table>
+    </details>
+  </section>
+
+
+  <footer>Updates every minute · times in your local time zone</footer>
+
+
+</main>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+
+
+<script>
+  // ==================================================================
+  // Settings
+  // ==================================================================
+
+  // Same project + publishable key as the ESP32. Safe to publish:
+  // row-level security only lets this key read and add rows.
+  const SUPABASE_URL = "https://efpuysmilwwuqpngaqnz.supabase.co";
+  const SUPABASE_KEY = "sb_publishable_v-4--bLc2EW8xLlfpWQ44A_amkiAa9Z";
+  const TABLE        = "HomeTankLevel";
+
+  // Tank: 2.05 m high x 1.25 m x 1.25 m
+  const TANK_HEIGHT_MM  = 2050;
+  const LITRES_PER_MM   = 1.25 * 1.25;                 // 1.5625 L per mm of fuel
+  const CAPACITY_L      = TANK_HEIGHT_MM * LITRES_PER_MM;  // 3203 L
+
+  const LOW_PCT         = 20;            // "Low" badge below this
+  const CRIT_PCT        = 10;            // "Very low" badge below this
+  const STALE_MIN       = 5;             // no reading for this long -> warning
+  const REFRESH_MS      = 60 * 1000;
+
+  // how many periods the consumption chart shows at once
+  const CONS_WINDOW = { day: 30, week: 12, month: 12 };
+
+  // bucket size (minutes) for the level chart
+  const LEVEL_BUCKET = { day: 10, week: 60, month: 240 };
+
+  const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Athens";
+
+
+  // ==================================================================
+  // State
+  // ==================================================================
+
+  const state = {
+    level: { period: "day", offset: 0 },
+    cons:  { period: "day", offset: 0 },
+    latest: null
+  };
+
+  let levelChart = null;
+  let consChart  = null;
+
+
+  // ==================================================================
+  // Supabase REST
+  // ==================================================================
+
+  async function sbGet(path) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+      headers: { apikey: SUPABASE_KEY, Accept: "application/json" }
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 160)}`);
+    return res.json();
+  }
+
+
+  async function sbRpc(fn, args) {
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: "POST",
+      headers: { apikey: SUPABASE_KEY, "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(args)
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${(await res.text()).slice(0, 160)}`);
+    return res.json();
+  }
+
+
+  // ==================================================================
+  // Date helpers (all in the browser's local time)
+  // ==================================================================
+
+  function startOfDay(d)   { const x = new Date(d); x.setHours(0, 0, 0, 0); return x; }
+
+  function startOfWeek(d)  {                       // Monday
+    const x = startOfDay(d);
+    const dow = (x.getDay() + 6) % 7;
+    x.setDate(x.getDate() - dow);
+    return x;
+  }
+
+  function startOfMonth(d) { const x = startOfDay(d); x.setDate(1); return x; }
+
+  function addPeriod(d, period, n) {
+    const x = new Date(d);
+    if (period === "day")   x.setDate(x.getDate() + n);
+    if (period === "week")  x.setDate(x.getDate() + 7 * n);
+    if (period === "month") x.setMonth(x.getMonth() + n);
+    return x;
+  }
+
+  function startOf(d, period) {
+    if (period === "day")  return startOfDay(d);
+    if (period === "week") return startOfWeek(d);
+    return startOfMonth(d);
+  }
+
+  function ymd(d) {
+    const p = n => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+  }
+
+
+  const fTime    = new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" });
+  const fDayMon  = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short" });
+  const fWdDay   = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric" });
+  const fFullDay = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+  const fMonYr   = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
+  const fMonShort= new Intl.DateTimeFormat(undefined, { month: "short", year: "2-digit" });
+  const fStamp   = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+
+  const nf0 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
+  const nf1 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
+
+
+  function agoText(date) {
+    const min = Math.round((Date.now() - date.getTime()) / 60000);
+    if (min < 1)    return "now";
+    if (min < 60)   return `${min} min`;
+    if (min < 1440) return `${Math.floor(min / 60)} h ${min % 60} m`;
+    return `${Math.floor(min / 1440)} d`;
+  }
+
+
+  function cssVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+
+  function setStatus(kind, text) {
+    document.getElementById("status").className = "status " + kind;
+    document.getElementById("statusText").textContent = text;
+  }
+
+
+  function showMsg(id, text, isErr) {
+    const el = document.getElementById(id);
+    el.hidden = !text;
+    el.textContent = text || "";
+    el.className = "msg" + (isErr ? " err" : "");
+  }
+
+
+  // ==================================================================
+  // Tiles
+  // ==================================================================
+
+  async function loadTiles() {
+    const rows = await sbGet(`${TABLE}?select=level_mm,fuel_litters,created_at&order=created_at.desc&limit=1`);
+    state.latest = rows[0] || null;
+
+
+    // today + last 7 full days
+    const today0 = startOfDay(new Date());
+    const week0  = addPeriod(today0, "day", -7);
+
+    const cons = await sbRpc("tank_consumption", {
+      p_from: week0.toISOString(), p_to: new Date().toISOString(), p_period: "day", p_tz: TZ
+    });
+
+    const todayKey = ymd(today0);
+    let todayL = 0, sum7 = 0;
+
+    for (const r of cons) {
+      if (r.period_start === todayKey) todayL = Number(r.consumed_l);
+      else                             sum7  += Number(r.consumed_l);
+    }
+
+    state.today = todayL;
+    state.avg7  = sum7 / 7;
+
+    renderTiles();
+  }
+
+
+  function renderTiles() {
+    const r = state.latest;
+
+    if (!r || r.fuel_litters == null) {
+      document.getElementById("remaining").innerHTML = "—<small>L</small>";
+      document.getElementById("heroSub").textContent = "No readings yet";
+      setStatus("warn", "No data");
+      return;
+    }
+
+
+    const litres = Number(r.fuel_litters);
+    const pct    = Math.max(0, Math.min(100, litres / CAPACITY_L * 100));
+    const t      = new Date(r.created_at);
+
+
+    // hero
+    document.getElementById("remaining").innerHTML = `${nf0.format(litres)}<small>L</small>`;
+    document.getElementById("heroSub").textContent =
+      `${nf0.format(pct)}% of ${nf0.format(CAPACITY_L)} L · fuel height ${nf0.format(litres / LITRES_PER_MM)} mm`;
+
+    const pill = document.getElementById("lowPill");
+    if (pct < CRIT_PCT)     pill.innerHTML = `<span class="pill crit">▼ Very low</span>`;
+    else if (pct < LOW_PCT) pill.innerHTML = `<span class="pill low">▼ Low</span>`;
+    else                    pill.innerHTML = "";
+
+
+    // tank gauge
+    const h = 112 * pct / 100;
+    const fill = document.getElementById("tankFill");
+    fill.setAttribute("y", String(116 - h));
+    fill.setAttribute("height", String(h));
+    fill.setAttribute("fill", pct < CRIT_PCT ? cssVar("--crit") : pct < LOW_PCT ? cssVar("--warn") : cssVar("--level"));
+    // percentage label: white inside the fill, normal ink above it
+    const pctText = document.getElementById("tankPct");
+    pctText.textContent = `${nf0.format(pct)}%`;
+    pctText.setAttribute("y", pct > 55 ? "70" : "64");
+    pctText.setAttribute("fill", pct > 55 ? "#ffffff" : cssVar("--text"));
+
+
+    // small tiles
+    document.getElementById("today").innerHTML = `${nf1.format(state.today ?? 0)}<small>L</small>`;
+    document.getElementById("avg7").innerHTML  = `${nf1.format(state.avg7 ?? 0)}<small>L</small>`;
+
+    const days = state.avg7 > 0.5 ? litres / state.avg7 : null;
+    document.getElementById("daysLeft").textContent = days == null ? "—" : days > 999 ? "999+" : nf0.format(days);
+
+    document.getElementById("lastAgo").textContent  = agoText(t);
+    document.getElementById("lastDist").textContent = `${fStamp.format(t)} · sensor ${nf0.format(r.level_mm)} mm`;
+
+
+    // status
+    const ageMin = (Date.now() - t.getTime()) / 60000;
+    if (ageMin > STALE_MIN) setStatus("warn", "Sensor quiet");
+    else                    setStatus("ok",   "Live");
+  }
+
+
+  // ==================================================================
+  // Level chart
+  // ==================================================================
+
+  function levelWindow() {
+    const { period, offset } = state.level;
+    const from = addPeriod(startOf(new Date(), period), period, -offset);
+    const to   = addPeriod(from, period, 1);
+    return { from, to };
+  }
+
+
+  function levelLabel(from, to) {
+    const p = state.level.period;
+    if (p === "day")  return fFullDay.format(from);
+    if (p === "week") return `${fDayMon.format(from)} – ${fDayMon.format(addPeriod(to, "day", -1))}`;
+    return fMonYr.format(from);
+  }
+
+
+  // x-axis ticks on round local times
+  function levelTicks(minMs, maxMs) {
+    const p = state.level.period;
+    const ticks = [];
+    const d = new Date(minMs);
+
+    if (p === "day") {
+      for (; d.getTime() <= maxMs; d.setHours(d.getHours() + 3)) ticks.push({ value: d.getTime() });
+    } else {
+      const step = p === "week" ? 1 : 5;
+      for (; d.getTime() <= maxMs; d.setDate(d.getDate() + step)) ticks.push({ value: d.getTime() });
+    }
+    return ticks;
+  }
+
+
+  function levelTickText(v) {
+    const p = state.level.period;
+    const d = new Date(v);
+    if (p === "day")  return fTime.format(d);
+    if (p === "week") return fWdDay.format(d);
+    return fDayMon.format(d);
+  }
+
+
+  async function loadLevel() {
+    const { from, to } = levelWindow();
+
+    document.getElementById("levelLabel").textContent = levelLabel(from, to);
+    document.getElementById("levelNext").disabled = state.level.offset === 0;
+
+
+    let rows;
+    try {
+      rows = await sbRpc("tank_series", {
+        p_from: from.toISOString(), p_to: to.toISOString(),
+        p_bucket_minutes: LEVEL_BUCKET[state.level.period]
+      });
+    }
+    catch (e) {
+      showMsg("levelMsg", "Could not load: " + e.message, true);
+      if (levelChart) { levelChart.destroy(); levelChart = null; }
+      return;
+    }
+
+
+    const pts = rows.map(r => ({ x: new Date(r.bucket_start).getTime(), y: Number(r.litres) }));
+
+
+    // summary line
+    if (pts.length) {
+      const ys = pts.map(p => p.y);
+      document.getElementById("levelSummary").innerHTML =
+        `Start <b>${nf0.format(ys[0])} L</b> · end <b>${nf0.format(ys[ys.length - 1])} L</b> · ` +
+        `min <b>${nf0.format(Math.min(...ys))}</b> · max <b>${nf0.format(Math.max(...ys))}</b>`;
+      showMsg("levelMsg", "");
+    } else {
+      document.getElementById("levelSummary").innerHTML = "&nbsp;";
+      showMsg("levelMsg", "No readings in this period.");
+    }
+
+
+    const color = cssVar("--level");
+    const soft  = cssVar("--level-soft");
+    const grid  = cssVar("--line");
+    const ink   = cssVar("--text-3");
+
+    if (levelChart) levelChart.destroy();
+
+    levelChart = new Chart(document.getElementById("levelChart"), {
+      type: "line",
+      data: {
+        datasets: [{
+          data: pts,
+          borderColor: color,
+          backgroundColor: soft,
+          fill: "origin",
+          borderWidth: 2,
+          pointRadius: 0,
+          pointHoverRadius: 5,
+          pointHoverBorderWidth: 2,
+          pointHoverBorderColor: cssVar("--card"),
+          pointHoverBackgroundColor: color,
+          tension: 0.25,
+          spanGaps: LEVEL_BUCKET[state.level.period] * 60 * 1000 * 3     // break the line over gaps > 3 buckets
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        parsing: false,
+        interaction: { mode: "nearest", axis: "x", intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            displayColors: false,
+            callbacks: {
+              title: it => fStamp.format(new Date(it[0].parsed.x)),
+              label: it => `${nf0.format(it.parsed.y)} L  (${nf0.format(it.parsed.y / CAPACITY_L * 100)}%)`
+            }
+          }
+        },
+        scales: {
+          x: {
+            type: "linear",
+            min: from.getTime(),
+            max: to.getTime(),
+            grid: { display: false },
+            border: { color: grid },
+            afterBuildTicks: axis => { axis.ticks = levelTicks(axis.min, axis.max); },
+            ticks: { color: ink, maxRotation: 0, autoSkip: true, callback: levelTickText }
+          },
+          y: {
+            min: 0,
+            max: Math.ceil(CAPACITY_L / 500) * 500,     // 3500 L - just above the 3203 L capacity
+            grid: { color: grid },
+            border: { display: false },
+            ticks: { color: ink, maxTicksLimit: 5, callback: v => `${nf0.format(v)} L` }
+          }
+        }
+      }
+    });
+  }
+
+
+  // ==================================================================
+  // Consumption chart
+  // ==================================================================
+
+  function consWindow() {
+    const { period, offset } = state.cons;
+    const n    = CONS_WINDOW[period];
+    const last = addPeriod(startOf(new Date(), period), period, -offset * n);   // first day of the newest period
+    const from = addPeriod(last, period, -(n - 1));
+    const to   = addPeriod(last, period, 1);
+    return { from, to, n };
+  }
+
+
+  function consBarLabel(d) {
+    const p = state.cons.period;
+    if (p === "month") return fMonShort.format(d);
+    return fDayMon.format(d);
+  }
+
+
+  function consBarTitle(d) {
+    const p = state.cons.period;
+    if (p === "day")  return fFullDay.format(d);
+    if (p === "week") return `Week of ${fDayMon.format(d)} – ${fDayMon.format(addPeriod(d, "day", 6))}`;
+    return fMonYr.format(d);
+  }
+
+
+  async function loadCons() {
+    const { from, to, n } = consWindow();
+    const p = state.cons.period;
+
+    document.getElementById("consLabel").textContent =
+      p === "month" ? `${fMonShort.format(from)} – ${fMonShort.format(addPeriod(to, "day", -1))}`
+                    : `${fDayMon.format(from)} – ${fDayMon.format(addPeriod(to, "day", -1))}`;
+    document.getElementById("consNext").disabled = state.cons.offset === 0;
+
+
+    let rows;
+    try {
+      rows = await sbRpc("tank_consumption", {
+        p_from: from.toISOString(), p_to: to.toISOString(), p_period: p, p_tz: TZ
+      });
+    }
+    catch (e) {
+      showMsg("consMsg", "Could not load: " + e.message, true);
+      if (consChart) { consChart.destroy(); consChart = null; }
+      return;
+    }
+
+
+    // one bar per period, empty periods = 0
+    const byKey = new Map(rows.map(r => [r.period_start, r]));
+    const periods = [];
+
+    for (let i = 0; i < n; i++) {
+      const d = addPeriod(from, p, i);
+      const r = byKey.get(ymd(d));
+      periods.push({
+        date:     d,
+        consumed: r ? Number(r.consumed_l) : 0,
+        refilled: r ? Number(r.refilled_l) : 0,
+        hasData:  !!r
+      });
+    }
+
+
+    // summary + table
+    // the average leaves out the current, unfinished period
+    const withData = periods.filter(x => x.hasData);
+    const complete = withData.filter(x => addPeriod(x.date, p, 1) <= new Date());
+    const total    = withData.reduce((s, x) => s + x.consumed, 0);
+    const refills  = withData.reduce((s, x) => s + x.refilled, 0);
+    const avg      = complete.length ? complete.reduce((s, x) => s + x.consumed, 0) / complete.length : null;
+
+    document.getElementById("consSummary").innerHTML = withData.length
+      ? `Total <b>${nf0.format(total)} L</b>` +
+        (avg != null ? ` · average <b>${nf1.format(avg)} L/${p}</b>` : "") +
+        (refills > 0 ? ` · refilled <b>${nf0.format(refills)} L</b>` : "")
+      : "&nbsp;";
+
+    document.getElementById("consTable").innerHTML = periods.slice().reverse().map(x =>
+      `<tr><td>${consBarTitle(x.date)}</td><td>${x.hasData ? nf1.format(x.consumed) : "–"}</td>` +
+      `<td>${x.hasData && x.refilled ? nf0.format(x.refilled) : "–"}</td></tr>`).join("");
+
+    showMsg("consMsg", withData.length ? "" : "No readings in this period.");
+
+
+    const color = cssVar("--cons");
+    const grid  = cssVar("--line");
+    const ink   = cssVar("--text-3");
+
+    if (consChart) consChart.destroy();
+
+    consChart = new Chart(document.getElementById("consChart"), {
+      type: "bar",
+      data: {
+        labels: periods.map(x => consBarLabel(x.date)),
+        datasets: [{
+          data: periods.map(x => x.consumed),
+          backgroundColor: color,
+          hoverBackgroundColor: color,
+          borderRadius: { topLeft: 4, topRight: 4 },
+          borderSkipped: "bottom",
+          categoryPercentage: 0.8,
+          barPercentage: 0.9,
+          maxBarThickness: 36
+        }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        interaction: { mode: "index", intersect: false },
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            displayColors: false,
+            callbacks: {
+              title: it => consBarTitle(periods[it[0].dataIndex].date),
+              label: it => {
+                const x = periods[it.dataIndex];
+                if (!x.hasData) return "No readings";
+                const lines = [`Consumed ${nf1.format(x.consumed)} L`];
+                if (x.refilled > 0) lines.push(`Refilled ${nf0.format(x.refilled)} L`);
+                return lines;
+              }
+            }
+          }
+        },
+        scales: {
+          x: {
+            grid: { display: false },
+            border: { color: grid },
+            ticks: { color: ink, maxRotation: 0, autoSkip: true, autoSkipPadding: 10 }
+          },
+          y: {
+            beginAtZero: true,
+            grid: { color: grid },
+            border: { display: false },
+            ticks: { color: ink, maxTicksLimit: 5, callback: v => `${nf0.format(v)} L` }
+          }
+        }
+      }
+    });
+  }
+
+
+  // ==================================================================
+  // Controls
+  // ==================================================================
+
+  function wireSeg(segId, key, loader) {
+    document.querySelectorAll(`#${segId} button`).forEach(btn => {
+      btn.addEventListener("click", () => {
+        state[key].period = btn.dataset.p;
+        state[key].offset = 0;
+        document.querySelectorAll(`#${segId} button`).forEach(b =>
+          b.setAttribute("aria-pressed", String(b === btn)));
+        loader();
+      });
+    });
+  }
+
+
+  wireSeg("levelSeg", "level", loadLevel);
+  wireSeg("consSeg",  "cons",  loadCons);
+
+
+  document.getElementById("levelPrev").onclick = () => { state.level.offset++; loadLevel(); };
+  document.getElementById("levelNext").onclick = () => { if (state.level.offset > 0) { state.level.offset--; loadLevel(); } };
+  document.getElementById("consPrev").onclick  = () => { state.cons.offset++;  loadCons(); };
+  document.getElementById("consNext").onclick  = () => { if (state.cons.offset > 0)  { state.cons.offset--;  loadCons(); } };
+
+
+  // ==================================================================
+  // Load cycle
+  // ==================================================================
+
+  async function refreshAll() {
+    try {
+      await loadTiles();
+    }
+    catch (e) {
+      console.error(e);
+      setStatus("err", "Can't reach database");
+    }
+
+    // only the newest periods change, so older views are not reloaded
+    if (state.level.offset === 0) loadLevel();
+    if (state.cons.offset  === 0) loadCons();
+  }
+
+
+  setInterval(refreshAll, REFRESH_MS);
+  setInterval(() => { if (state.latest) renderTiles(); }, 30 * 1000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) refreshAll(); });
+
+
+  refreshAll();
+</script>
+</body>
+</html>
+<!-- generated by Claude 2026-11-04 09:53 -->
