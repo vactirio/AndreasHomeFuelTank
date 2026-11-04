@@ -394,6 +394,11 @@
   const WEATHER_TTL_MS      = 30 * 60 * 1000;   // re-fetch recent days every 30 min, older days never
 
 
+  // Heating oil price, Attica (€/L), filled daily by .github/workflows/heating-price.yml
+  const PRICES_URL = "https://raw.githubusercontent.com/vactirio/AndreasHomeFuelTank/main/heating_oil_prices.json";
+  const PRICES_TTL_MS = 60 * 60 * 1000;
+
+
   // ==================================================================
   // State
   // ==================================================================
@@ -589,6 +594,42 @@
 
     return n ? { mean: sum / n, min, max } : null;
   }
+
+
+  // ==================================================================
+  // Heating oil price
+  // ==================================================================
+
+  let priceDays = [];                  // sorted [["YYYY-MM-DD", €/L], ...]
+  let pricesAt  = 0;
+
+  async function ensurePrices() {
+    if (Date.now() - pricesAt < PRICES_TTL_MS) return;
+    const res = await fetch(PRICES_URL, { cache: "no-store" });
+    if (!res.ok) throw new Error(`Prices HTTP ${res.status}`);
+    priceDays = Object.entries(await res.json()).sort((a, b) => a[0] < b[0] ? -1 : 1);
+    pricesAt  = Date.now();
+  }
+
+  // price on a day = latest bulletin on or before it (none is published off-season)
+  function priceOn(key) {
+    let p = null;
+    for (const [k, v] of priceDays) { if (k > key) break; p = v; }
+    return p;
+  }
+
+  // average €/L over [from, to), days up to today
+  function priceRange(from, to) {
+    const today = startOfDay(new Date());
+    let sum = 0, n = 0;
+    for (let d = new Date(from); d < to && d <= today; d = addPeriod(d, "day", 1)) {
+      const p = priceOn(ymd(d));
+      if (p != null) { sum += p; n++; }
+    }
+    return n ? sum / n : null;
+  }
+
+  const nfEur = new Intl.NumberFormat(undefined, { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
 
 
   // ==================================================================
@@ -939,7 +980,8 @@
         sbRpc("tank_consumption", {
           p_from: from.toISOString(), p_to: to.toISOString(), p_period: p, p_tz: TZ
         }),
-        ensureWeather(from, to).catch(e => console.warn("Outdoor temperature:", e))
+        ensureWeather(from, to).catch(e => console.warn("Outdoor temperature:", e)),
+        ensurePrices().catch(e => console.warn("Heating oil price:", e))
       ]);
     }
     catch (e) {
@@ -961,7 +1003,8 @@
         consumed: r ? Number(r.consumed_l) : 0,
         refilled: r ? Number(r.refilled_l) : 0,
         hasData:  !!r,
-        temp:     weatherRange(d, addPeriod(d, p, 1))
+        temp:     weatherRange(d, addPeriod(d, p, 1)),
+        price:    priceRange(d, addPeriod(d, p, 1))
       });
     }
 
@@ -1064,6 +1107,7 @@
                 if (!x.hasData) lines.push("No readings");
                 else {
                   lines.push(`Consumed ${nf1.format(x.consumed)} L`);
+                  if (x.price != null && x.consumed > 0) lines.push(`Cost ≈ ${nfEur.format(Math.round(x.consumed * x.price))}`);
                   if (x.refilled > 0) lines.push(`Refilled ${nf0.format(x.refilled)} L`);
                 }
                 if (x.temp) {
