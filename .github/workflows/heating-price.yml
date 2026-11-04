@@ -1,0 +1,30 @@
+name: Heating oil price
+
+on:
+  schedule:
+    - cron: "17 9 * * *"     # daily, ~11:17 Athens
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Fetch price
+        run: python scripts/fetch_heating_price.py
+
+      - name: Commit
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898699+github-actions[bot]@users.noreply.github.com"
+          git add heating_oil_prices.json
+          git diff --cached --quiet || git commit -m "Heating oil price $(date +%F)"
+          git push
