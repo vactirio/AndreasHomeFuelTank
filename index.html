@@ -25,6 +25,7 @@
     --level:       #2a78d6;     /* fuel level series   */
     --level-soft:  rgba(42, 120, 214, 0.14);
     --cons:        #eb6834;     /* consumption series  */
+    --temp:        #6b5bd2;     /* outdoor temperature */
     --ok:          #1f8a3b;
     --warn:        #b26a00;
     --crit:        #c23b3a;
@@ -48,6 +49,7 @@
       --level:       #3987e5;
       --level-soft:  rgba(57, 135, 229, 0.18);
       --cons:        #d95926;
+      --temp:        #a294f2;
       --ok:          #4cc36b;
       --warn:        #e9a23b;
       --crit:        #e66767;
@@ -66,6 +68,7 @@
     --level:       #3987e5;
     --level-soft:  rgba(57, 135, 229, 0.18);
     --cons:        #d95926;
+    --temp:        #a294f2;
     --ok:          #4cc36b;
     --warn:        #e9a23b;
     --crit:        #e66767;
@@ -227,6 +230,7 @@
   th { color: var(--text-3); font-weight: 500; }
 
   footer { color: var(--text-3); font-size: 12px; text-align: center; margin-top: 6px; }
+  footer a { color: inherit; }
 </style>
 </head>
 
@@ -335,14 +339,14 @@
     <details>
       <summary>Show as table</summary>
       <table>
-        <thead><tr><th>Period</th><th>Consumed (L)</th><th>Refilled (L)</th></tr></thead>
+        <thead><tr><th>Period</th><th>Consumed (L)</th><th>Refilled (L)</th><th>Outdoor avg (°C)</th><th>Min / max (°C)</th></tr></thead>
         <tbody id="consTable"></tbody>
       </table>
     </details>
   </section>
 
 
-  <footer>Updates every minute · times in your local time zone</footer>
+  <footer>Updates every minute · times in your local time zone · outdoor temperature by <a href="https://open-meteo.com/" target="_blank" rel="noopener">Open-Meteo</a></footer>
 
 
 </main>
@@ -379,6 +383,15 @@
   const LEVEL_BUCKET = { day: 10, week: 60, month: 240 };
 
   const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Athens";
+
+
+  // Outdoor temperature (Open-Meteo, free, no key needed)
+  // Home location
+  const WEATHER_LAT = 38.0296;
+  const WEATHER_LON = 23.7717;
+
+  const WEATHER_RECENT_DAYS = 90;        // the forecast API keeps about 3 months of past days
+  const WEATHER_TTL_MS      = 30 * 60 * 1000;   // re-fetch recent days every 30 min, older days never
 
 
   // ==================================================================
@@ -479,6 +492,102 @@
 
   function cssVar(name) {
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
+
+  // ==================================================================
+  // Outdoor temperature (Open-Meteo)
+  // ==================================================================
+
+  // one entry per local day: "YYYY-MM-DD" -> { mean, min, max } in °C
+  const weatherDays   = new Map();
+  let   weatherRecentAt = 0;           // when the recent days were last fetched
+
+
+  async function omGet(host, path, fromYmd, toYmd) {
+    const q = new URLSearchParams({
+      latitude:   WEATHER_LAT,
+      longitude:  WEATHER_LON,
+      daily:      "temperature_2m_mean,temperature_2m_min,temperature_2m_max",
+      timezone:   TZ,
+      start_date: fromYmd,
+      end_date:   toYmd
+    });
+
+    const res = await fetch(`https://${host}/v1/${path}?${q}`);
+    if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
+
+    const d = (await res.json()).daily || {};
+
+    (d.time || []).forEach((day, i) => {
+      const min  = d.temperature_2m_min  ? d.temperature_2m_min[i]  : null;
+      const max  = d.temperature_2m_max  ? d.temperature_2m_max[i]  : null;
+      let   mean = d.temperature_2m_mean ? d.temperature_2m_mean[i] : null;
+
+      if (mean == null && min != null && max != null) mean = (min + max) / 2;
+      if (mean == null) return;                       // the archive leaves its newest days empty
+
+      weatherDays.set(day, { mean, min, max });
+    });
+  }
+
+
+  function weatherMissing(from, last) {
+    for (let d = new Date(from); d <= last; d = addPeriod(d, "day", 1)) {
+      if (!weatherDays.has(ymd(d))) return true;
+    }
+    return false;
+  }
+
+
+  // make sure every day in [from, to) up to today is in weatherDays
+  async function ensureWeather(from, to) {
+    const today   = startOfDay(new Date());
+    const toLast  = addPeriod(to, "day", -1);
+    const last    = toLast > today ? today : toLast;
+    if (last < from) return;
+
+    const recent0 = addPeriod(today, "day", -WEATHER_RECENT_DAYS);
+    const jobs    = [];
+
+
+    // older days: historical archive, fetched once and kept
+    if (from < recent0) {
+      const end = last < recent0 ? last : addPeriod(recent0, "day", -1);
+      if (weatherMissing(from, end)) {
+        jobs.push(omGet("archive-api.open-meteo.com", "archive", ymd(from), ymd(end)));
+      }
+    }
+
+
+    // recent days (incl. today): forecast API, refreshed every WEATHER_TTL_MS
+    if (last >= recent0) {
+      const start = from > recent0 ? from : recent0;
+      if (weatherMissing(start, last) || Date.now() - weatherRecentAt > WEATHER_TTL_MS) {
+        jobs.push(omGet("api.open-meteo.com", "forecast", ymd(start), ymd(last))
+          .then(() => { weatherRecentAt = Date.now(); }));
+      }
+    }
+
+    await Promise.all(jobs);
+  }
+
+
+  // average of the daily means, lowest min and highest max over [from, to), days up to today
+  function weatherRange(from, to) {
+    const today = startOfDay(new Date());
+    let sum = 0, n = 0, min = null, max = null;
+
+    for (let d = new Date(from); d < to && d <= today; d = addPeriod(d, "day", 1)) {
+      const w = weatherDays.get(ymd(d));
+      if (!w) continue;
+
+      sum += w.mean; n++;
+      if (w.min != null) min = min == null ? w.min : Math.min(min, w.min);
+      if (w.max != null) max = max == null ? w.max : Math.max(max, w.max);
+    }
+
+    return n ? { mean: sum / n, min, max } : null;
   }
 
 
@@ -825,9 +934,13 @@
 
     let rows;
     try {
-      rows = await sbRpc("tank_consumption", {
-        p_from: from.toISOString(), p_to: to.toISOString(), p_period: p, p_tz: TZ
-      });
+      // the weather is optional: if Open-Meteo fails, the chart still shows the fuel
+      [rows] = await Promise.all([
+        sbRpc("tank_consumption", {
+          p_from: from.toISOString(), p_to: to.toISOString(), p_period: p, p_tz: TZ
+        }),
+        ensureWeather(from, to).catch(e => console.warn("Outdoor temperature:", e))
+      ]);
     }
     catch (e) {
       showMsg("consMsg", "Could not load: " + e.message, true);
@@ -847,7 +960,8 @@
         date:     d,
         consumed: r ? Number(r.consumed_l) : 0,
         refilled: r ? Number(r.refilled_l) : 0,
-        hasData:  !!r
+        hasData:  !!r,
+        temp:     weatherRange(d, addPeriod(d, p, 1))
       });
     }
 
@@ -860,20 +974,31 @@
     const refills  = withData.reduce((s, x) => s + x.refilled, 0);
     const avg      = complete.length ? complete.reduce((s, x) => s + x.consumed, 0) / complete.length : null;
 
-    document.getElementById("consSummary").innerHTML = withData.length
+    const tAll    = weatherRange(from, to);
+    const hasTemp = periods.some(x => x.temp);
+
+    const fuelText = withData.length
       ? `Total <b>${nf0.format(total)} L</b>` +
         (avg != null ? ` · average <b>${nf1.format(avg)} L/${p}</b>` : "") +
         (refills > 0 ? ` · refilled <b>${nf0.format(refills)} L</b>` : "")
-      : "&nbsp;";
+      : "";
+
+    const tempText = tAll ? `outdoor avg <b>${nf1.format(tAll.mean)} °C</b>` : "";
+
+    document.getElementById("consSummary").innerHTML =
+      [fuelText, tempText].filter(Boolean).join(" · ") || "&nbsp;";
 
     document.getElementById("consTable").innerHTML = periods.slice().reverse().map(x =>
       `<tr><td>${consBarTitle(x.date)}</td><td>${x.hasData ? nf1.format(x.consumed) : "–"}</td>` +
-      `<td>${x.hasData && x.refilled ? nf0.format(x.refilled) : "–"}</td></tr>`).join("");
+      `<td>${x.hasData && x.refilled ? nf0.format(x.refilled) : "–"}</td>` +
+      `<td>${x.temp ? nf1.format(x.temp.mean) : "–"}</td>` +
+      `<td>${x.temp && x.temp.min != null ? `${nf0.format(x.temp.min)} / ${nf0.format(x.temp.max)}` : "–"}</td></tr>`).join("");
 
     showMsg("consMsg", withData.length ? "" : "No readings in this period.");
 
 
     const color = cssVar("--cons");
+    const tcol  = cssVar("--temp");
     const grid  = cssVar("--line");
     const ink   = cssVar("--text-3");
 
@@ -885,6 +1010,7 @@
       data: {
         labels: periods.map(x => consBarLabel(x.date)),
         datasets: [{
+          label: "Consumed (L)",
           data: periods.map(x => x.consumed),
           backgroundColor: color,
           hoverBackgroundColor: color,
@@ -892,7 +1018,26 @@
           borderSkipped: "bottom",
           categoryPercentage: 0.8,
           barPercentage: 0.9,
-          maxBarThickness: 36
+          maxBarThickness: 36,
+          order: 2
+        },
+        {
+          // outdoor temperature on its own right-hand axis, drawn over the bars
+          type: "line",
+          label: "Outdoor (°C)",
+          data: periods.map(x => x.temp ? x.temp.mean : null),
+          yAxisID: "t",
+          borderColor: tcol,
+          backgroundColor: tcol,
+          borderWidth: 2,
+          pointRadius: 2,
+          pointHoverRadius: 5,
+          pointHoverBorderWidth: 2,
+          pointHoverBorderColor: cssVar("--card"),
+          tension: 0.3,
+          spanGaps: true,
+          hidden: !hasTemp,
+          order: 1
         }]
       },
       options: {
@@ -902,16 +1047,29 @@
         events: HOVER_EVENTS,
         interaction: { mode: "index", intersect: false },
         plugins: {
-          legend: { display: false },
+          legend: {
+            display: hasTemp,
+            position: "top",
+            align: "end",
+            labels: { color: ink, usePointStyle: true, pointStyle: "circle", boxWidth: 8, boxHeight: 8, padding: 12 }
+          },
           tooltip: {
             ...tooltipStyle(),
+            filter: it => it.datasetIndex === 0,          // one tooltip per period, built below
             callbacks: {
               title: it => consBarTitle(periods[it[0].dataIndex].date),
               label: it => {
                 const x = periods[it.dataIndex];
-                if (!x.hasData) return "No readings";
-                const lines = [`Consumed ${nf1.format(x.consumed)} L`];
-                if (x.refilled > 0) lines.push(`Refilled ${nf0.format(x.refilled)} L`);
+                const lines = [];
+                if (!x.hasData) lines.push("No readings");
+                else {
+                  lines.push(`Consumed ${nf1.format(x.consumed)} L`);
+                  if (x.refilled > 0) lines.push(`Refilled ${nf0.format(x.refilled)} L`);
+                }
+                if (x.temp) {
+                  const range = x.temp.min != null ? `  (${nf0.format(x.temp.min)} … ${nf0.format(x.temp.max)})` : "";
+                  lines.push(`Outdoor ${nf1.format(x.temp.mean)} °C${range}`);
+                }
                 return lines;
               }
             }
@@ -927,7 +1085,15 @@
             beginAtZero: true,
             grid: { color: grid },
             border: { display: false },
-            ticks: { color: ink, maxTicksLimit: 5, callback: v => `${nf0.format(v)} L` }
+            ticks: { color: ink, maxTicksLimit: 5, precision: 0, callback: v => `${nf0.format(v)} L` }
+          },
+          t: {
+            display: hasTemp,
+            position: "right",
+            grace: "15%",
+            grid: { drawOnChartArea: false },
+            border: { display: false },
+            ticks: { color: ink, maxTicksLimit: 5, precision: 0, callback: v => `${nf0.format(v)} °C` }
           }
         }
       }
@@ -990,4 +1156,4 @@
 </script>
 </body>
 </html>
-<!-- generated by Claude 2026-11-04 12:31 -->
+<!-- generated by Claude 2026-11-04 15:43 -->
