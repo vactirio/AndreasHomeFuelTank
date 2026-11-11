@@ -297,6 +297,7 @@
     <div class="bar">
       <h2>Fuel level</h2>
       <div class="seg" role="group" aria-label="Level period" id="levelSeg">
+        <button data-p="hour"  aria-pressed="false">Hour</button>
         <button data-p="day"   aria-pressed="true">Day</button>
         <button data-p="week"  aria-pressed="false">Week</button>
         <button data-p="month" aria-pressed="false">Month</button>
@@ -379,8 +380,21 @@
   // how many periods the consumption chart shows at once
   const CONS_WINDOW = { day: 30, week: 12, month: 12 };
 
-  // bucket size (minutes) for the level chart
-  const LEVEL_BUCKET = { day: 10, week: 60, month: 240 };
+  // level chart: every view is a ROLLING window that ends now (or earlier, after ‹)
+  //   spanMin   - window length in minutes
+  //   stepMin   - how far ‹ / › move the window
+  //   bucketMin - bucket size sent to tank_series
+  //   tickMin   - x-axis tick every N minutes, on round local clock times (hour, day)
+  //   tickDays  - x-axis tick every N days at local midnight (week, month)
+  const LEVEL_VIEW = {
+    hour:  { spanMin: 60,        stepMin: 15,       bucketMin: 1,   tickMin: 10  },
+    day:   { spanMin: 24 * 60,   stepMin: 2 * 60,   bucketMin: 10,  tickMin: 180 },
+    week:  { spanMin: 7 * 1440,  stepMin: 1440,     bucketMin: 60,  tickDays: 1  },
+    month: { spanMin: 30 * 1440, stepMin: 5 * 1440, bucketMin: 240, tickDays: 5  }
+  };
+
+  // the Hour view zooms the y-axis to the data, +/- this many litres
+  const HOUR_Y_PAD_L = 5;
 
   const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Athens";
 
@@ -481,6 +495,7 @@
   const fMonYr   = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
   const fMonShort= new Intl.DateTimeFormat(undefined, { month: "short", year: "2-digit" });
   const fStamp   = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const fDayTime = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
   const nf0 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
   const nf1 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 });
@@ -777,33 +792,41 @@
   // Level chart
   // ==================================================================
 
+  // rolling window: offset 0 ends now, each ‹ moves it back by stepMin
   function levelWindow() {
-    const { period, offset } = state.level;
-    const from = addPeriod(startOf(new Date(), period), period, -offset);
-    const to   = addPeriod(from, period, 1);
+    const v    = LEVEL_VIEW[state.level.period];
+    const to   = new Date(Date.now() - state.level.offset * v.stepMin * 60000);
+    const from = new Date(to.getTime() - v.spanMin * 60000);
     return { from, to };
   }
 
 
   function levelLabel(from, to) {
     const p = state.level.period;
-    if (p === "day")  return fFullDay.format(from);
-    if (p === "week") return `${fDayMon.format(from)} – ${fDayMon.format(addPeriod(to, "day", -1))}`;
-    return fMonYr.format(from);
+    if (p === "hour") return `${fDayMon.format(to)} · ${fTime.format(from)} – ${fTime.format(to)}`;
+    if (p === "day")  return `${fDayTime.format(from)} – ${fDayTime.format(to)}`;
+    return `${fDayMon.format(from)} – ${fDayMon.format(to)}`;
   }
 
 
-  // x-axis ticks on round local times
+  // x-axis ticks on round local times, inside the rolling window
   function levelTicks(minMs, maxMs) {
-    const p = state.level.period;
+    const v = LEVEL_VIEW[state.level.period];
     const ticks = [];
-    const d = new Date(minMs);
 
-    if (p === "day") {
-      for (; d.getTime() <= maxMs; d.setHours(d.getHours() + 3)) ticks.push({ value: d.getTime() });
+    if (v.tickMin) {
+      // first round clock time at or after the window start (e.g. :10, :20 … or 00:00, 03:00 …)
+      const d  = new Date(minMs);
+      const m  = d.getHours() * 60 + d.getMinutes() + (d.getSeconds() || d.getMilliseconds() ? 1 : 0);
+      d.setHours(0, Math.ceil(m / v.tickMin) * v.tickMin, 0, 0);
+
+      for (; d.getTime() <= maxMs; d.setMinutes(d.getMinutes() + v.tickMin)) ticks.push({ value: d.getTime() });
     } else {
-      const step = p === "week" ? 1 : 5;
-      for (; d.getTime() <= maxMs; d.setDate(d.getDate() + step)) ticks.push({ value: d.getTime() });
+      // local midnights
+      const d = startOfDay(new Date(minMs));
+      if (d.getTime() < minMs) d.setDate(d.getDate() + 1);
+
+      for (; d.getTime() <= maxMs; d.setDate(d.getDate() + v.tickDays)) ticks.push({ value: d.getTime() });
     }
     return ticks;
   }
@@ -812,8 +835,8 @@
   function levelTickText(v) {
     const p = state.level.period;
     const d = new Date(v);
-    if (p === "day")  return fTime.format(d);
-    if (p === "week") return fWdDay.format(d);
+    if (p === "hour" || p === "day") return fTime.format(d);
+    if (p === "week")                return fWdDay.format(d);
     return fDayMon.format(d);
   }
 
@@ -829,7 +852,7 @@
     try {
       rows = await sbRpc("tank_series", {
         p_from: from.toISOString(), p_to: to.toISOString(),
-        p_bucket_minutes: LEVEL_BUCKET[state.level.period]
+        p_bucket_minutes: LEVEL_VIEW[state.level.period].bucketMin
       });
     }
     catch (e) {
@@ -840,11 +863,18 @@
 
 
     const pts = rows.map(r => ({ x: new Date(r.bucket_start).getTime(), y: Number(r.litres) }));
+    const ys  = pts.map(p => p.y);
+
+
+    // y-axis: full tank scale, except the Hour view which zooms to the data
+    const yFull = { min: 0, max: Math.ceil(CAPACITY_L / 500) * 500 };     // 3500 L - just above the 3203 L capacity
+    const yAxis = state.level.period === "hour" && ys.length
+      ? { min: Math.max(0, Math.floor(Math.min(...ys) - HOUR_Y_PAD_L)), max: Math.ceil(Math.max(...ys) + HOUR_Y_PAD_L) }
+      : yFull;
 
 
     // summary line
     if (pts.length) {
-      const ys = pts.map(p => p.y);
       document.getElementById("levelSummary").innerHTML =
         `Start <b>${nf0.format(ys[0])} L</b> · end <b>${nf0.format(ys[ys.length - 1])} L</b> · ` +
         `min <b>${nf0.format(Math.min(...ys))}</b> · max <b>${nf0.format(Math.max(...ys))}</b>`;
@@ -878,7 +908,7 @@
           pointHoverBorderColor: cssVar("--card"),
           pointHoverBackgroundColor: color,
           tension: 0.25,
-          spanGaps: LEVEL_BUCKET[state.level.period] * 60 * 1000 * 3     // break the line over gaps > 3 buckets
+          spanGaps: LEVEL_VIEW[state.level.period].bucketMin * 60 * 1000 * 3     // break the line over gaps > 3 buckets
         }]
       },
       options: {
@@ -909,8 +939,8 @@
             ticks: { color: ink, maxRotation: 0, autoSkip: true, callback: levelTickText }
           },
           y: {
-            min: 0,
-            max: Math.ceil(CAPACITY_L / 500) * 500,     // 3500 L - just above the 3203 L capacity
+            min: yAxis.min,
+            max: yAxis.max,
             grid: { color: grid },
             border: { display: false },
             ticks: { color: ink, maxTicksLimit: 5, callback: v => `${nf0.format(v)} L` }
@@ -1187,4 +1217,4 @@
 </script>
 </body>
 </html>
-<!-- generated by Claude 2026-11-04 15:43 -->
+<!-- generated by Claude 2026-11-11 14:00 -->
