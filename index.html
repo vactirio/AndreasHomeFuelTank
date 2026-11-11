@@ -322,6 +322,7 @@
     <div class="bar">
       <h2>Fuel consumption</h2>
       <div class="seg" role="group" aria-label="Consumption grouping" id="consSeg">
+        <button data-p="hour"  aria-pressed="false">Hour</button>
         <button data-p="day"   aria-pressed="true">Day</button>
         <button data-p="week"  aria-pressed="false">Week</button>
         <button data-p="month" aria-pressed="false">Month</button>
@@ -377,8 +378,20 @@
   const STALE_MIN       = 5;             // no reading for this long -> warning
   const REFRESH_MS      = 60 * 1000;
 
-  // how many periods the consumption chart shows at once
-  const CONS_WINDOW = { day: 30, week: 12, month: 12 };
+  // consumption chart: ROLLING bars, the newest one ends now (or earlier, after ‹)
+  //   bars      - how many bars the chart shows
+  //   barMin    - length of one bar in minutes
+  //   stepMin   - how far ‹ / › move the window
+  //   bucketMin - bucket size sent to tank_series, the bars are computed from it
+  const CONS_VIEW = {
+    hour:  { bars: 24, barMin: 60,        stepMin: 2 * 60,    bucketMin: 15   },
+    day:   { bars: 30, barMin: 1440,      stepMin: 1440,      bucketMin: 60   },
+    week:  { bars: 12, barMin: 7 * 1440,  stepMin: 7 * 1440,  bucketMin: 240  },
+    month: { bars: 12, barMin: 30 * 1440, stepMin: 30 * 1440, bucketMin: 1440 }
+  };
+
+  // a rise bigger than this between two buckets is a refill, smaller ones are sensor noise
+  const REFILL_MIN_L = 20;
 
   // level chart: every view is a ROLLING window that ends now (or earlier, after ‹)
   //   spanMin   - window length in minutes
@@ -495,6 +508,7 @@
   const fMonYr   = new Intl.DateTimeFormat(undefined, { month: "long", year: "numeric" });
   const fMonShort= new Intl.DateTimeFormat(undefined, { month: "short", year: "2-digit" });
   const fStamp   = new Intl.DateTimeFormat(undefined, { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const fMonYear = new Intl.DateTimeFormat(undefined, { month: "short", year: "numeric" });
   const fDayTime = new Intl.DateTimeFormat(undefined, { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 
   const nf0 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
@@ -519,8 +533,9 @@
   // Outdoor temperature (Open-Meteo)
   // ==================================================================
 
-  // one entry per local day: "YYYY-MM-DD" -> { mean, min, max } in °C
-  const weatherDays   = new Map();
+  // hourly temperatures, so rolling bars (e.g. 13:47 – 14:47) get their own value
+  const weatherHours  = new Map();     // hour start (ms) -> °C
+  const weatherLoaded = new Set();     // local days "YYYY-MM-DD" already fetched
   let   weatherRecentAt = 0;           // when the recent days were last fetched
 
 
@@ -528,7 +543,7 @@
     const q = new URLSearchParams({
       latitude:   WEATHER_LAT,
       longitude:  WEATHER_LON,
-      daily:      "temperature_2m_mean,temperature_2m_min,temperature_2m_max",
+      hourly:     "temperature_2m",
       timezone:   TZ,
       start_date: fromYmd,
       end_date:   toYmd
@@ -537,33 +552,33 @@
     const res = await fetch(`https://${host}/v1/${path}?${q}`);
     if (!res.ok) throw new Error(`Open-Meteo HTTP ${res.status}`);
 
-    const d = (await res.json()).daily || {};
+    const h = (await res.json()).hourly || {};
 
-    (d.time || []).forEach((day, i) => {
-      const min  = d.temperature_2m_min  ? d.temperature_2m_min[i]  : null;
-      const max  = d.temperature_2m_max  ? d.temperature_2m_max[i]  : null;
-      let   mean = d.temperature_2m_mean ? d.temperature_2m_mean[i] : null;
+    // times come back as wall-clock strings ("2026-11-11T14:00") in TZ, the browser's
+    // own zone, so new Date() reads them as the right local hour
+    (h.time || []).forEach((t, i) => {
+      const v = h.temperature_2m ? h.temperature_2m[i] : null;
+      if (v == null) return;                          // the archive leaves its newest days empty
 
-      if (mean == null && min != null && max != null) mean = (min + max) / 2;
-      if (mean == null) return;                       // the archive leaves its newest days empty
-
-      weatherDays.set(day, { mean, min, max });
+      weatherHours.set(new Date(t).getTime(), v);
+      weatherLoaded.add(t.slice(0, 10));
     });
   }
 
 
   function weatherMissing(from, last) {
     for (let d = new Date(from); d <= last; d = addPeriod(d, "day", 1)) {
-      if (!weatherDays.has(ymd(d))) return true;
+      if (!weatherLoaded.has(ymd(d))) return true;
     }
     return false;
   }
 
 
-  // make sure every day in [from, to) up to today is in weatherDays
-  async function ensureWeather(from, to) {
+  // make sure every local day touched by [fromT, toT), up to today, is loaded
+  async function ensureWeather(fromT, toT) {
     const today   = startOfDay(new Date());
-    const toLast  = addPeriod(to, "day", -1);
+    const from    = startOfDay(fromT);
+    const toLast  = startOfDay(new Date(toT.getTime() - 1));
     const last    = toLast > today ? today : toLast;
     if (last < from) return;
 
@@ -593,18 +608,19 @@
   }
 
 
-  // average of the daily means, lowest min and highest max over [from, to), days up to today
+  // mean, lowest and highest hourly temperature over [from, to), hours up to now
   function weatherRange(from, to) {
-    const today = startOfDay(new Date());
+    const H   = 3600 * 1000;
+    const end = Math.min(to.getTime(), Date.now());
     let sum = 0, n = 0, min = null, max = null;
 
-    for (let d = new Date(from); d < to && d <= today; d = addPeriod(d, "day", 1)) {
-      const w = weatherDays.get(ymd(d));
-      if (!w) continue;
+    for (let t = Math.ceil(from.getTime() / H) * H; t < end; t += H) {
+      const v = weatherHours.get(t);
+      if (v == null) continue;
 
-      sum += w.mean; n++;
-      if (w.min != null) min = min == null ? w.min : Math.min(min, w.min);
-      if (w.max != null) max = max == null ? w.max : Math.max(max, w.max);
+      sum += v; n++;
+      min = min == null ? v : Math.min(min, v);
+      max = max == null ? v : Math.max(max, v);
     }
 
     return n ? { mean: sum / n, min, max } : null;
@@ -955,48 +971,97 @@
   // Consumption chart
   // ==================================================================
 
+  // rolling window: offset 0 ends now, each ‹ moves it back by stepMin
   function consWindow() {
-    const { period, offset } = state.cons;
-    const n    = CONS_WINDOW[period];
-    const last = addPeriod(startOf(new Date(), period), period, -offset * n);   // first day of the newest period
-    const from = addPeriod(last, period, -(n - 1));
-    const to   = addPeriod(last, period, 1);
-    return { from, to, n };
+    const v    = CONS_VIEW[state.cons.period];
+    const to   = new Date(Date.now() - state.cons.offset * v.stepMin * 60000);
+    const from = new Date(to.getTime() - v.bars * v.barMin * 60000);
+    return { from, to, v };
   }
 
 
-  function consBarLabel(d) {
-    const p = state.cons.period;
-    if (p === "month") return fMonShort.format(d);
-    return fDayMon.format(d);
+  // x-axis label: the END of the bar (hour bars: end time, the others: end date)
+  function consBarLabel(x) {
+    if (state.cons.period === "hour") return fTime.format(x.end);
+    return fDayMon.format(x.end);
   }
 
 
-  function consBarTitle(d) {
+  // tooltip / table: the exact rolling range of the bar
+  function consBarTitle(x) {
     const p = state.cons.period;
-    if (p === "day")  return fFullDay.format(d);
-    if (p === "week") return `Week of ${fDayMon.format(d)} – ${fDayMon.format(addPeriod(d, "day", 6))}`;
-    return fMonYr.format(d);
+    if (p === "hour") return `${fDayMon.format(x.start)} · ${fTime.format(x.start)} – ${fTime.format(x.end)}`;
+    if (p === "day")  return `${fDayTime.format(x.start)} – ${fDayTime.format(x.end)}`;
+    return `${fDayMon.format(x.start)} – ${fDayMon.format(x.end)}`;
+  }
+
+
+  function consLabel(from, to) {
+    const p = state.cons.period;
+    if (p === "hour")  return `${fDayTime.format(from)} – ${fDayTime.format(to)}`;
+    if (p === "month") return `${fMonYear.format(from)} – ${fMonYear.format(to)}`;
+    return `${fDayMon.format(from)} – ${fDayMon.format(to)}`;
+  }
+
+
+  // consumption per rolling bar, from the bucketed level series:
+  // each step between two buckets counts for the bar the later bucket falls in,
+  // drops add to "consumed", rises above REFILL_MIN_L count as a refill,
+  // small rises (sensor noise) cancel out against small drops
+  function consBars(pts, from, to, v) {
+    const barMs = v.barMin * 60000;
+    const bars  = [];
+
+    for (let i = 0; i < v.bars; i++) {
+      bars.push({
+        start:    new Date(from.getTime() + i * barMs),
+        end:      new Date(from.getTime() + (i + 1) * barMs),
+        consumed: 0,
+        refilled: 0,
+        hasData:  false
+      });
+    }
+
+
+    for (let i = 0; i < pts.length; i++) {
+      const x = pts[i].x;
+      if (x < from.getTime() || x >= to.getTime()) continue;
+
+      const bar = bars[Math.floor((x - from.getTime()) / barMs)];
+      bar.hasData = true;
+      if (i === 0) continue;
+
+      const delta = pts[i].y - pts[i - 1].y;
+      if (delta > REFILL_MIN_L) bar.refilled += delta;
+      else                      bar.consumed -= delta;
+    }
+
+
+    bars.forEach(b => { b.consumed = Math.max(0, b.consumed); });
+    return bars;
   }
 
 
   async function loadCons() {
-    const { from, to, n } = consWindow();
+    const { from, to, v } = consWindow();
     const p = state.cons.period;
 
-    document.getElementById("consLabel").textContent =
-      p === "month" ? `${fMonShort.format(from)} – ${fMonShort.format(addPeriod(to, "day", -1))}`
-                    : `${fDayMon.format(from)} – ${fDayMon.format(addPeriod(to, "day", -1))}`;
+    document.getElementById("consLabel").textContent = consLabel(from, to);
     document.getElementById("consNext").disabled = state.cons.offset === 0;
 
 
-    let rows;
+    let rows, before;
     try {
+      // "before" = the last reading before the window, however old, so the first bar
+      // has a starting level even after a sensor gap (otherwise that drop is lost)
       // the weather is optional: if Open-Meteo fails, the chart still shows the fuel
-      [rows] = await Promise.all([
-        sbRpc("tank_consumption", {
-          p_from: from.toISOString(), p_to: to.toISOString(), p_period: p, p_tz: TZ
+      [rows, before] = await Promise.all([
+        sbRpc("tank_series", {
+          p_from: from.toISOString(),
+          p_to:   to.toISOString(),
+          p_bucket_minutes: v.bucketMin
         }),
+        sbGet(`${TABLE}?select=fuel_litters,created_at&created_at=lt.${encodeURIComponent(from.toISOString())}&order=created_at.desc&limit=1`),
         ensureWeather(from, to).catch(e => console.warn("Outdoor temperature:", e)),
         ensurePrices().catch(e => console.warn("Heating oil price:", e))
       ]);
@@ -1008,31 +1073,27 @@
     }
 
 
-    // one bar per period, empty periods = 0
-    const byKey = new Map(rows.map(r => [r.period_start, r]));
-    const periods = [];
+    // one bar per rolling interval, empty intervals = 0
+    const pts     = rows.map(r => ({ x: new Date(r.bucket_start).getTime(), y: Number(r.litres) }));
 
-    for (let i = 0; i < n; i++) {
-      const d = addPeriod(from, p, i);
-      const r = byKey.get(ymd(d));
-      periods.push({
-        date:     d,
-        consumed: r ? Number(r.consumed_l) : 0,
-        refilled: r ? Number(r.refilled_l) : 0,
-        hasData:  !!r,
-        temp:     weatherRange(d, addPeriod(d, p, 1)),
-        price:    priceRange()
-      });
+    if (before.length && before[0].fuel_litters != null) {
+      pts.unshift({ x: new Date(before[0].created_at).getTime(), y: Number(before[0].fuel_litters) });
     }
+
+    const periods = consBars(pts, from, to, v);
+
+    periods.forEach(x => {
+      x.temp  = weatherRange(x.start, x.end);
+      x.price = priceRange();
+    });
 
 
     // summary + table
-    // the average leaves out the current, unfinished period
+    // every rolling bar is complete (it ends now at the latest), so all bars with data count
     const withData = periods.filter(x => x.hasData);
-    const complete = withData.filter(x => addPeriod(x.date, p, 1) <= new Date());
     const total    = withData.reduce((s, x) => s + x.consumed, 0);
     const refills  = withData.reduce((s, x) => s + x.refilled, 0);
-    const avg      = complete.length ? complete.reduce((s, x) => s + x.consumed, 0) / complete.length : null;
+    const avg      = withData.length ? total / withData.length : null;
 
     const tAll    = weatherRange(from, to);
     const hasTemp = periods.some(x => x.temp);
@@ -1049,7 +1110,7 @@
       [fuelText, tempText].filter(Boolean).join(" · ") || "&nbsp;";
 
     document.getElementById("consTable").innerHTML = periods.slice().reverse().map(x =>
-      `<tr><td>${consBarTitle(x.date)}</td><td>${x.hasData ? nf1.format(x.consumed) : "–"}</td>` +
+      `<tr><td>${consBarTitle(x)}</td><td>${x.hasData ? nf1.format(x.consumed) : "–"}</td>` +
       `<td>${x.hasData && x.refilled ? nf0.format(x.refilled) : "–"}</td>` +
       `<td>${x.temp ? nf1.format(x.temp.mean) : "–"}</td>` +
       `<td>${x.temp && x.temp.min != null ? `${nf0.format(x.temp.min)} / ${nf0.format(x.temp.max)}` : "–"}</td></tr>`).join("");
@@ -1068,7 +1129,7 @@
       type: "bar",
       plugins: [hoverLine],
       data: {
-        labels: periods.map(x => consBarLabel(x.date)),
+        labels: periods.map(x => consBarLabel(x)),
         datasets: [{
           label: "Consumed (L)",
           data: periods.map(x => x.consumed),
@@ -1117,7 +1178,7 @@
             ...tooltipStyle(),
             filter: it => it.datasetIndex === 0,          // one tooltip per period, built below
             callbacks: {
-              title: it => consBarTitle(periods[it[0].dataIndex].date),
+              title: it => consBarTitle(periods[it[0].dataIndex]),
               label: it => {
                 const x = periods[it.dataIndex];
                 const lines = [];
@@ -1128,7 +1189,7 @@
                   if (x.refilled > 0) lines.push(`Refilled ${nf0.format(x.refilled)} L`);
                 }
                 if (x.temp) {
-                  const range = x.temp.min != null ? `  (${nf0.format(x.temp.min)} … ${nf0.format(x.temp.max)})` : "";
+                  const range = x.temp.min != null && x.temp.min !== x.temp.max ? `  (${nf0.format(x.temp.min)} … ${nf0.format(x.temp.max)})` : "";
                   lines.push(`Outdoor ${nf1.format(x.temp.mean)} °C${range}`);
                 }
                 return lines;
@@ -1217,4 +1278,4 @@
 </script>
 </body>
 </html>
-<!-- generated by Claude 2026-11-11 14:00 -->
+<!-- generated by Claude 2026-11-11 14:51 -->
