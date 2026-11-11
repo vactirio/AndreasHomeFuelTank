@@ -378,16 +378,18 @@
   const STALE_MIN       = 5;             // no reading for this long -> warning
   const REFRESH_MS      = 60 * 1000;
 
-  // consumption chart: ROLLING bars, the newest one ends now (or earlier, after ‹)
+  // consumption chart: bars on WHOLE calendar units, the newest one is the current unit so far
+  //   hour 08:00 – 09:00 · day 00:00 – 24:00 · week Monday – Monday · month 1st – 1st
   //   bars      - how many bars the chart shows
-  //   barMin    - length of one bar in minutes
-  //   stepMin   - how far ‹ / › move the window
+  //   unit      - length of one bar (hour, day, week, month), on local time
+  //   step      - how many units ‹ / › move the window
   //   bucketMin - bucket size sent to tank_series, the bars are computed from it
+  //               (tank_series buckets are UTC-aligned: 60 or less keeps them on local midnight)
   const CONS_VIEW = {
-    hour:  { bars: 24, barMin: 60,        stepMin: 2 * 60,    bucketMin: 15   },
-    day:   { bars: 30, barMin: 1440,      stepMin: 1440,      bucketMin: 60   },
-    week:  { bars: 12, barMin: 7 * 1440,  stepMin: 7 * 1440,  bucketMin: 240  },
-    month: { bars: 12, barMin: 30 * 1440, stepMin: 30 * 1440, bucketMin: 1440 }
+    hour:  { bars: 24, unit: "hour",  step: 2, bucketMin: 15 },
+    day:   { bars: 30, unit: "day",   step: 1, bucketMin: 60 },
+    week:  { bars: 12, unit: "week",  step: 1, bucketMin: 60 },
+    month: { bars: 12, unit: "month", step: 1, bucketMin: 60 }
   };
 
   // a rise bigger than this between two buckets is a refill, smaller ones are sensor noise
@@ -979,26 +981,51 @@
   // Consumption chart
   // ==================================================================
 
-  // rolling window on ROUND clock hours: bars run 08:00 – 09:00, 09:00 – 10:00 …
-  // offset 0 ends at the next full hour, so the newest bar is the current hour so far;
-  // each ‹ moves the window back by stepMin
-  function consWindow() {
-    const v   = CONS_VIEW[state.cons.period];
-    const end = new Date();
-    end.setMinutes(0, 0, 0);
-    end.setHours(end.getHours() + 1);                  // next full local hour
+  // start of the local calendar unit that contains d (weeks start on Monday)
+  function unitStart(d, unit) {
+    const s = new Date(d);
+    if (unit === "hour") { s.setMinutes(0, 0, 0); return s; }
 
-    const to   = new Date(end.getTime() - state.cons.offset * v.stepMin * 60000);
-    const from = new Date(to.getTime() - v.bars * v.barMin * 60000);
+    s.setHours(0, 0, 0, 0);
+    if (unit === "week")  s.setDate(s.getDate() - (s.getDay() + 6) % 7);
+    if (unit === "month") s.setDate(1);
+    return s;
+  }
+
+
+  // d moved by n local calendar units (DST-safe: a day stays midnight to midnight)
+  function addUnits(d, unit, n) {
+    const s = new Date(d);
+    if (unit === "hour")  s.setHours(s.getHours() + n);
+    if (unit === "day")   s.setDate(s.getDate() + n);
+    if (unit === "week")  s.setDate(s.getDate() + 7 * n);
+    if (unit === "month") s.setMonth(s.getMonth() + n);
+    return s;
+  }
+
+
+  // window on WHOLE calendar units: offset 0 ends where the current unit ends,
+  // so the newest bar is the current hour / day / week / month so far;
+  // each ‹ moves the window back by step units
+  function consWindow() {
+    const v    = CONS_VIEW[state.cons.period];
+    const end  = addUnits(unitStart(new Date(), v.unit), v.unit, 1);     // end of the current unit
+
+    const to   = addUnits(end, v.unit, -state.cons.offset * v.step);
+    const from = addUnits(to, v.unit, -v.bars);
     return { from, to, v };
   }
 
 
-  // x-axis label: hour bars show their start hour (08:00 = 08:00 – 09:00), the others their end date
+  // x-axis label: the unit the bar covers
+  //   hour: 08:00 (= 08:00 – 09:00) + DD/MM · day: its date · week: its Monday · month: month + year
   function consBarLabel(x) {
+    const p = state.cons.period;
+
     // hour view: two lines — the hour, then the date (DD/MM)
-    if (state.cons.period === "hour") return [hourText(x.start), ddmmText(x.start)];
-    return fDayMon.format(x.end);
+    if (p === "hour")  return [hourText(x.start), ddmmText(x.start)];
+    if (p === "month") return fMonShort.format(x.start);
+    return fDayMon.format(x.start);
   }
 
 
@@ -1006,32 +1033,34 @@
   function consBarTitle(x) {
     const p    = state.cons.period;
     const open = x.end.getTime() > Date.now() ? " (so far)" : "";
-    if (p === "hour") return `${fDayMon.format(x.start)} · ${hourText(x.start)} – ${hourText(x.end)}${open}`;
-    if (p === "day")  return `${fDayTime.format(x.start)} – ${fDayTime.format(x.end)}${open}`;
-    return `${fDayMon.format(x.start)} – ${fDayMon.format(x.end)}${open}`;
+    if (p === "hour")  return `${fDayMon.format(x.start)} · ${hourText(x.start)} – ${hourText(x.end)}${open}`;
+    if (p === "day")   return `${fFullDay.format(x.start)}${open}`;
+    if (p === "week")  return `${fDayMon.format(x.start)} – ${fDayMon.format(addUnits(x.end, "day", -1))}${open}`;
+    return `${fMonYr.format(x.start)}${open}`;
   }
 
 
+  // window caption; the last day / month shown is the one before "to"
   function consLabel(from, to) {
     const p = state.cons.period;
     if (p === "hour")  return `${fDayTime.format(from)} – ${fDayTime.format(to)}`;
-    if (p === "month") return `${fMonYear.format(from)} – ${fMonYear.format(to)}`;
-    return `${fDayMon.format(from)} – ${fDayMon.format(to)}`;
+    if (p === "month") return `${fMonYear.format(from)} – ${fMonYear.format(addUnits(to, "month", -1))}`;
+    return `${fDayMon.format(from)} – ${fDayMon.format(addUnits(to, "day", -1))}`;
   }
 
 
-  // consumption per rolling bar, from the bucketed level series:
+  // consumption per calendar bar, from the bucketed level series:
   // each step between two buckets counts for the bar the later bucket falls in,
   // drops add to "consumed", rises above REFILL_MIN_L count as a refill,
   // small rises (sensor noise) cancel out against small drops
   function consBars(pts, from, to, v) {
-    const barMs = v.barMin * 60000;
-    const bars  = [];
+    const bars = [];
 
+    // bars differ in length (months, DST days), so each one gets its own start / end
     for (let i = 0; i < v.bars; i++) {
       bars.push({
-        start:    new Date(from.getTime() + i * barMs),
-        end:      new Date(from.getTime() + (i + 1) * barMs),
+        start:    addUnits(from, v.unit, i),
+        end:      addUnits(from, v.unit, i + 1),
         consumed: 0,
         refilled: 0,
         hasData:  false
@@ -1043,7 +1072,8 @@
       const x = pts[i].x;
       if (x < from.getTime() || x >= to.getTime()) continue;
 
-      const bar = bars[Math.floor((x - from.getTime()) / barMs)];
+      const bar = bars.find(b => x < b.end.getTime());
+      if (!bar) continue;
       bar.hasData = true;
       if (i === 0) continue;
 
@@ -1055,6 +1085,26 @@
 
     bars.forEach(b => { b.consumed = Math.max(0, b.consumed); });
     return bars;
+  }
+
+
+  // tank_series in chunks, so a long window with small buckets (12 months of hours)
+  // stays under the API row limit; chunk edges are whole hours, a bucket returned twice keeps the later copy
+  async function consSeries(from, to, bucketMin) {
+    const chunkMs = 900 * bucketMin * 60000;
+    const calls   = [];
+
+    for (let t = from.getTime(); t < to.getTime(); t += chunkMs) {
+      calls.push(sbRpc("tank_series", {
+        p_from: new Date(t).toISOString(),
+        p_to:   new Date(Math.min(t + chunkMs, to.getTime())).toISOString(),
+        p_bucket_minutes: bucketMin
+      }));
+    }
+
+    const byStart = new Map();
+    (await Promise.all(calls)).flat().forEach(r => byStart.set(r.bucket_start, r));
+    return [...byStart.values()];
   }
 
 
@@ -1072,11 +1122,7 @@
       // has a starting level even after a sensor gap (otherwise that drop is lost)
       // the weather is optional: if Open-Meteo fails, the chart still shows the fuel
       [rows, before] = await Promise.all([
-        sbRpc("tank_series", {
-          p_from: from.toISOString(),
-          p_to:   to.toISOString(),
-          p_bucket_minutes: v.bucketMin
-        }),
+        consSeries(from, to, v.bucketMin),
         sbGet(`${TABLE}?select=fuel_litters,created_at&created_at=lt.${encodeURIComponent(from.toISOString())}&order=created_at.desc&limit=1`),
         ensureWeather(from, to).catch(e => console.warn("Outdoor temperature:", e)),
         ensurePrices().catch(e => console.warn("Heating oil price:", e))
@@ -1089,7 +1135,7 @@
     }
 
 
-    // one bar per rolling interval, empty intervals = 0
+    // one bar per calendar unit, empty units = 0
     const pts     = rows.map(r => ({ x: new Date(r.bucket_start).getTime(), y: Number(r.litres) }));
 
     if (before.length && before[0].fuel_litters != null) {
@@ -1295,4 +1341,4 @@
 </script>
 </body>
 </html>
-<!-- generated by Claude 2026-11-11 16:34 -->
+<!-- generated by Claude 2026-11-11 16:43 -->
