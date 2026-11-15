@@ -395,21 +395,8 @@
   // a rise bigger than this between two buckets is a refill, smaller ones are sensor noise
   const REFILL_MIN_L = 20;
 
-  // level chart: every view is a ROLLING window that ends now (or earlier, after ‹)
-  //   spanMin   - window length in minutes
-  //   stepMin   - how far ‹ / › move the window
-  //   bucketMin - bucket size sent to tank_series
-  //   tickMin   - x-axis tick every N minutes, on round local clock times (hour, day)
-  //   tickDays  - x-axis tick every N days at local midnight (week, month)
-  const LEVEL_VIEW = {
-    hour:  { spanMin: 60,        stepMin: 15,       bucketMin: 1,   tickMin: 10  },
-    day:   { spanMin: 24 * 60,   stepMin: 2 * 60,   bucketMin: 10,  tickMin: 180 },
-    week:  { spanMin: 7 * 1440,  stepMin: 1440,     bucketMin: 60,  tickDays: 1  },
-    month: { spanMin: 30 * 1440, stepMin: 5 * 1440, bucketMin: 240, tickDays: 5  }
-  };
-
-  // the Hour view zooms the y-axis to the data, +/- this many litres
-  const HOUR_Y_PAD_L = 5;
+  // level chart: same whole calendar units as the consumption chart (CONS_VIEW),
+  // one point per unit = the level at the end of that unit (the newest one = now)
 
   const TZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/Athens";
 
@@ -818,68 +805,38 @@
   // Level chart
   // ==================================================================
 
-  // rolling window: offset 0 ends now, each ‹ moves it back by stepMin
-  function levelWindow() {
-    const v    = LEVEL_VIEW[state.level.period];
-    const to   = new Date(Date.now() - state.level.offset * v.stepMin * 60000);
-    const from = new Date(to.getTime() - v.spanMin * 60000);
-    return { from, to };
-  }
-
-
-  function levelLabel(from, to) {
-    const p = state.level.period;
-    if (p === "hour") return `${fDayMon.format(to)} · ${fTime.format(from)} – ${fTime.format(to)}`;
-    if (p === "day")  return `${fDayTime.format(from)} – ${fDayTime.format(to)}`;
-    return `${fDayMon.format(from)} – ${fDayMon.format(to)}`;
-  }
-
-
-  // x-axis ticks on round local times, inside the rolling window
-  function levelTicks(minMs, maxMs) {
-    const v = LEVEL_VIEW[state.level.period];
-    const ticks = [];
-
-    if (v.tickMin) {
-      // first round clock time at or after the window start (e.g. :10, :20 … or 00:00, 03:00 …)
-      const d  = new Date(minMs);
-      const m  = d.getHours() * 60 + d.getMinutes() + (d.getSeconds() || d.getMilliseconds() ? 1 : 0);
-      d.setHours(0, Math.ceil(m / v.tickMin) * v.tickMin, 0, 0);
-
-      for (; d.getTime() <= maxMs; d.setMinutes(d.getMinutes() + v.tickMin)) ticks.push({ value: d.getTime() });
-    } else {
-      // local midnights
-      const d = startOfDay(new Date(minMs));
-      if (d.getTime() < minMs) d.setDate(d.getDate() + 1);
-
-      for (; d.getTime() <= maxMs; d.setDate(d.getDate() + v.tickDays)) ticks.push({ value: d.getTime() });
+  // one point per whole calendar unit (hour / day / week / month), like the consumption bars:
+  // the last level reading inside the unit, null when the unit has no readings
+  function levelPoints(pts, from, to, v) {
+    const units = [];
+    for (let i = 0; i < v.bars; i++) {
+      units.push({ start: addUnits(from, v.unit, i), end: addUnits(from, v.unit, i + 1), level: null, min: null, max: null });
     }
-    return ticks;
-  }
 
+    pts.sort((a, b) => a.x - b.x).forEach(pt => {
+      if (pt.x < from.getTime() || pt.x >= to.getTime()) return;
+      const u = units.find(x => pt.x < x.end.getTime());
+      if (!u) return;
+      u.level = pt.y;
+      u.min   = u.min == null ? pt.y : Math.min(u.min, pt.y);
+      u.max   = u.max == null ? pt.y : Math.max(u.max, pt.y);
+    });
 
-  function levelTickText(v) {
-    const p = state.level.period;
-    const d = new Date(v);
-    if (p === "hour" || p === "day") return hourText(d);
-    if (p === "week")                return fWdDay.format(d);
-    return fDayMon.format(d);
+    return units;
   }
 
 
   async function loadLevel() {
-    const { from, to } = levelWindow();
+    const p = state.level.period;
+    const { from, to, v } = consWindow(p, state.level.offset);
 
-    document.getElementById("levelLabel").textContent = levelLabel(from, to);
+    document.getElementById("levelLabel").textContent = consLabel(from, to, p);
     document.getElementById("levelNext").disabled = state.level.offset === 0;
 
 
     let rows;
     try {
-      rows = await sbRpc("tank_series", {
-        p_from: from.toISOString(), p_to: to.toISOString(),
-        p_bucket_minutes: LEVEL_VIEW[state.level.period].bucketMin
-      });
+      rows = await consSeries(from, to, v.bucketMin);
     }
     catch (e) {
       showMsg("levelMsg", "Could not load: " + e.message, true);
@@ -888,22 +845,16 @@
     }
 
 
-    const pts = rows.map(r => ({ x: new Date(r.bucket_start).getTime(), y: Number(r.litres) }));
-    const ys  = pts.map(p => p.y);
-
-
-    // y-axis: full tank scale, except the Hour view which zooms to the data
-    const yFull = { min: 0, max: Math.ceil(CAPACITY_L / 500) * 500 };     // 3500 L - just above the 3203 L capacity
-    const yAxis = state.level.period === "hour" && ys.length
-      ? { min: Math.max(0, Math.floor(Math.min(...ys) - HOUR_Y_PAD_L)), max: Math.ceil(Math.max(...ys) + HOUR_Y_PAD_L) }
-      : yFull;
+    const units = levelPoints(rows.map(r => ({ x: new Date(r.bucket_start).getTime(), y: Number(r.litres) })), from, to, v);
+    const ys    = units.filter(u => u.level != null).map(u => u.level);
 
 
     // summary line
-    if (pts.length) {
+    if (ys.length) {
+      const mins = units.filter(u => u.min != null);
       document.getElementById("levelSummary").innerHTML =
         `Start <b>${nf0.format(ys[0])} L</b> · end <b>${nf0.format(ys[ys.length - 1])} L</b> · ` +
-        `min <b>${nf0.format(Math.min(...ys))}</b> · max <b>${nf0.format(Math.max(...ys))}</b>`;
+        `min <b>${nf0.format(Math.min(...mins.map(u => u.min)))}</b> · max <b>${nf0.format(Math.max(...mins.map(u => u.max)))}</b>`;
       showMsg("levelMsg", "");
     } else {
       document.getElementById("levelSummary").innerHTML = "&nbsp;";
@@ -912,7 +863,6 @@
 
 
     const color = cssVar("--level");
-    const soft  = cssVar("--level-soft");
     const grid  = cssVar("--line");
     const ink   = cssVar("--text-3");
 
@@ -922,54 +872,57 @@
       type: "line",
       plugins: [hoverLine],
       data: {
+        labels: units.map(u => consBarLabel(u, p)),
         datasets: [{
-          data: pts,
+          data: units.map(u => u.level),
           borderColor: color,
-          backgroundColor: soft,
-          fill: "origin",
+          backgroundColor: color,
+          fill: false,
           borderWidth: 2,
-          pointRadius: 0,
+          pointRadius: 2,
           pointHoverRadius: 5,
           pointHoverBorderWidth: 2,
           pointHoverBorderColor: cssVar("--card"),
           pointHoverBackgroundColor: color,
           tension: 0.25,
-          spanGaps: LEVEL_VIEW[state.level.period].bucketMin * 60 * 1000 * 3     // break the line over gaps > 3 buckets
+          spanGaps: true
         }]
       },
       options: {
         responsive: true,
         maintainAspectRatio: false,
         animation: false,
-        parsing: false,
         events: HOVER_EVENTS,
-        interaction: { mode: "nearest", axis: "x", intersect: false },
+        interaction: { mode: "index", intersect: false },
         plugins: {
           legend: { display: false },
           tooltip: {
             ...tooltipStyle(),
             callbacks: {
-              title: it => fStamp.format(new Date(it[0].parsed.x)),
-              label: it => `${nf0.format(it.parsed.y)} L  (${nf0.format(it.parsed.y / CAPACITY_L * 100)}%)`
+              title: it => consBarTitle(units[it[0].dataIndex], p),
+              label: it => {
+                const u = units[it.dataIndex];
+                if (u.level == null) return "No readings";
+                const lines = [`${nf0.format(u.level)} L  (${nf0.format(u.level / CAPACITY_L * 100)}%)`];
+                if (u.min !== u.max) lines.push(`min ${nf0.format(u.min)} · max ${nf0.format(u.max)} L`);
+                return lines;
+              }
             }
           }
         },
         scales: {
           x: {
-            type: "linear",
-            min: from.getTime(),
-            max: to.getTime(),
             grid: { display: false },
             border: { color: grid },
-            afterBuildTicks: axis => { axis.ticks = levelTicks(axis.min, axis.max); },
-            ticks: { color: ink, maxRotation: 0, autoSkip: true, callback: levelTickText }
+            ticks: { color: ink, maxRotation: 0, autoSkip: true, autoSkipPadding: 10 }
           },
           y: {
-            min: yAxis.min,
-            max: yAxis.max,
+            // autoscale to the data, with a little room above and below
+            beginAtZero: false,
+            grace: "10%",
             grid: { color: grid },
             border: { display: false },
-            ticks: { color: ink, maxTicksLimit: 5, callback: v => `${nf0.format(v)} L` }
+            ticks: { color: ink, maxTicksLimit: 6, precision: 0, callback: v => `${nf0.format(v)} L` }
           }
         }
       }
@@ -1007,11 +960,11 @@
   // window on WHOLE calendar units: offset 0 ends where the current unit ends,
   // so the newest bar is the current hour / day / week / month so far;
   // each ‹ moves the window back by step units
-  function consWindow() {
-    const v    = CONS_VIEW[state.cons.period];
+  function consWindow(p = state.cons.period, offset = state.cons.offset) {
+    const v    = CONS_VIEW[p];
     const end  = addUnits(unitStart(new Date(), v.unit), v.unit, 1);     // end of the current unit
 
-    const to   = addUnits(end, v.unit, -state.cons.offset * v.step);
+    const to   = addUnits(end, v.unit, -offset * v.step);
     const from = addUnits(to, v.unit, -v.bars);
     return { from, to, v };
   }
@@ -1019,8 +972,7 @@
 
   // x-axis label: the unit the bar covers
   //   hour: 08:00 (= 08:00 – 09:00) + DD/MM · day: its date · week: its Monday · month: month + year
-  function consBarLabel(x) {
-    const p = state.cons.period;
+  function consBarLabel(x, p = state.cons.period) {
 
     // hour view: two lines — the hour, then the date (DD/MM)
     if (p === "hour")  return [hourText(x.start), ddmmText(x.start)];
@@ -1030,8 +982,7 @@
 
 
   // tooltip / table: the exact range of the bar, "(so far)" for the one still running
-  function consBarTitle(x) {
-    const p    = state.cons.period;
+  function consBarTitle(x, p = state.cons.period) {
     const open = x.end.getTime() > Date.now() ? " (so far)" : "";
     if (p === "hour")  return `${fDayMon.format(x.start)} · ${hourText(x.start)} – ${hourText(x.end)}${open}`;
     if (p === "day")   return `${fFullDay.format(x.start)}${open}`;
@@ -1041,8 +992,7 @@
 
 
   // window caption; the last day / month shown is the one before "to"
-  function consLabel(from, to) {
-    const p = state.cons.period;
+  function consLabel(from, to, p = state.cons.period) {
     if (p === "hour")  return `${fDayTime.format(from)} – ${fDayTime.format(to)}`;
     if (p === "month") return `${fMonYear.format(from)} – ${fMonYear.format(addUnits(to, "month", -1))}`;
     return `${fDayMon.format(from)} – ${fDayMon.format(addUnits(to, "day", -1))}`;
